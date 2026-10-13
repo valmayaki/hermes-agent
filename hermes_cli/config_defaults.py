@@ -1991,6 +1991,10 @@ DEFAULT_CONFIG = {
                 "show_tip", "desktop_project", "close_terminal",
                 "apply_layout", "read_terminal", "read_window_below", "focus_pane",
             ],
+            # Tool names or fnmatch globs that always stay eager (never behind the bridge), even
+            # MCP/plugin tools or names in ``defer``; e.g. ["mcp__github__*"] keeps one server's
+            # tools directly callable while other MCP servers stay deferred. [] = no exemptions.
+            "eager": [],
         },
         # Remote connector discovery/lifecycle through the Nous tool gateway.
         # The flag is the user's off switch; availability additionally requires

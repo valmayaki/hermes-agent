@@ -143,6 +143,17 @@ class TestConfigYamlRouting:
         assert config["tools"]["tool_search"]["defer"] == ["todo_list", "skill_manage"]
 
 
+    def test_tool_search_eager_is_recognized(self, _isolated_hermes_home, capsys):
+        """tools.tool_search.eager is read by ToolSearchConfig.from_raw, so it must be a
+        registered config key and coerce to a real list."""
+        set_config_value("tools.tool_search.eager", '["mcp__github__*"]')
+
+        captured = capsys.readouterr()
+        assert "not a recognized config key" not in captured.out
+        assert "not a recognized config key" not in captured.err
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["tools"]["tool_search"]["eager"] == ["mcp__github__*"]
+
     def test_terminal_docker_shared_key_preserves_string_values(
         self, _isolated_hermes_home, capsys
     ):

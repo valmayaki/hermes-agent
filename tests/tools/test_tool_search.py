@@ -59,6 +59,22 @@ class TestConfigParsing:
             assert ToolSearchConfig.from_raw({"defer": "todo_list"}).effective_defer_tools == configured
         assert any(r.levelname == "WARNING" for r in caplog.records)
 
+    def test_eager_list_parsed_and_scalar_warned_and_ignored(self, caplog):
+        """tools.tool_search.eager is registered (default []), a list becomes a frozenset of
+        names/globs, and a scalar is warned about and ignored (no exemptions)."""
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        from tools.tool_search import ToolSearchConfig
+
+        assert DEFAULT_CONFIG["tools"]["tool_search"]["eager"] == []
+        assert ToolSearchConfig.from_raw(None).eager_tools is None
+        assert ToolSearchConfig.from_raw({"eager": []}).eager_tools is None
+        assert ToolSearchConfig.from_raw(
+            {"eager": ["mcp__gmail_triage__*", " x "]}).eager_tools == {"mcp__gmail_triage__*", "x"}
+
+        with caplog.at_level("WARNING", logger="tools.tool_search"):
+            assert ToolSearchConfig.from_raw({"eager": "mcp__gmail_triage__*"}).eager_tools is None
+        assert any(r.levelname == "WARNING" and "eager" in r.getMessage() for r in caplog.records)
+
     def test_bool_true_maps_to_auto(self):
         from tools.tool_search import ToolSearchConfig
         cfg = ToolSearchConfig.from_raw(True)
@@ -167,6 +183,64 @@ class TestClassification:
         assert "computer_use" not in names
 
 
+
+    @pytest.mark.parametrize("pattern", ["mcp__gmail_triage__*", "mcp__gmail_triage__gmail_search_cache"])
+    def test_eager_tools_stay_direct_across_assembly_and_bridge(self, pattern):
+        """Eager exceptions override deferral without opening other tools or session scopes."""
+        import yaml
+        from tools.registry import discover_builtin_tools, registry
+        from tools.tool_search import (
+            BRIDGE_TOOL_NAMES, assemble_tool_defs, dispatch_tool_describe,
+            dispatch_tool_search, is_deferrable_tool_name, load_config_readonly,
+            resolve_underlying_call, scoped_deferrable_names,
+        )
+
+        discover_builtin_tools()
+        gmail = "mcp__gmail_triage__gmail_search_cache"
+        other = "mcp__other_probe__do_thing"
+        for name in (gmail, other):
+            registry.register(
+                name=name, handler=lambda args, **kw: "{}",
+                schema=_td(name, "Search records")["function"], toolset="mcp-eager-probe",
+            )
+        # Exercise the runtime reader using a real user config, including the
+        # explicit defer entry that eager must override.
+        from hermes_constants import get_hermes_home
+        config_path = get_hermes_home() / "config.yaml"
+        config_path.write_text(yaml.safe_dump({"tools": {"tool_search": {
+            "enabled": "on", "defer": [gmail], "eager": [pattern],
+        }}}))
+        config = load_config_readonly()
+        assert not is_deferrable_tool_name(gmail, config.effective_defer_tools, config.eager_tools)
+        assert is_deferrable_tool_name(other, config.effective_defer_tools, config.eager_tools)
+        assert not is_deferrable_tool_name("terminal", frozenset({"terminal"}), frozenset({"terminal"}))
+        for name in BRIDGE_TOOL_NAMES:
+            assert not is_deferrable_tool_name(name, None, frozenset({"*"}))
+
+        defs = [_td("terminal", "Run a command"), _td(gmail, "Search records"),
+                _td(other, "Search records")]
+        assembled = assemble_tool_defs(defs, context_length=200_000, config=config)
+        names = {td["function"]["name"] for td in assembled.tool_defs}
+        assert assembled.activated and assembled.deferred_count == 1
+        assert gmail in names and "terminal" in names
+        assert other not in names and BRIDGE_TOOL_NAMES <= names
+        assert scoped_deferrable_names(defs) == {other}
+        assert scoped_deferrable_names([defs[0], defs[1]]) == set()
+        searched = json.loads(dispatch_tool_search({"queries": ["records"]}, current_tool_defs=defs))
+        assert set(searched["tools"]) == {other}
+        described = json.loads(dispatch_tool_describe({"names": [gmail, other]}, current_tool_defs=defs))
+        assert set(described["tools"]) == {other}
+        assert gmail in described["errors"]
+        name, args, error = resolve_underlying_call({"calls": [{"name": gmail, "arguments": {}}]})
+        assert name is None and error
+        # An explicitly supplied config must also govern the bridge catalog.
+        config_path.unlink()
+        searched = json.loads(dispatch_tool_search(
+            {"queries": ["records"]}, current_tool_defs=defs, config=config))
+        assert set(searched["tools"]) == {other}
+        described = json.loads(dispatch_tool_describe(
+            {"names": [gmail, other]}, current_tool_defs=defs, config=config))
+        assert set(described["tools"]) == {other} and gmail in described["errors"]
 
     def test_classify_keeps_unknown_in_visible(self):
         """A tool we can't classify stays visible — never silently dropped.
